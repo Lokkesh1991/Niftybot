@@ -2,12 +2,12 @@ import os
 import time
 from datetime import datetime, timedelta, time as dtime
 from kiteconnect import KiteConnect
-from token_manager import get_access_token
+from Railway_token_manager import get_access_token  # ✅ Use Railway token manager
 
 # === CONFIG ===
 LOTS_PER_ENTRY = 1
 TOTAL_LOTS = 3
-DRY_RUN = False
+DRY_RUN = False  # Set to True to avoid real orders
 MONITOR_INTERVAL = 3600  # 1 hour
 STAGGER_DELAY = 1800     # 30 minutes
 
@@ -17,6 +17,7 @@ def get_kite_client():
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(get_access_token())
     kite.profile()
+    print("✅ Connected to Kite.")
     return kite
 
 # === UTILITIES ===
@@ -43,15 +44,15 @@ def get_contract_symbol(year, month):
 
 def get_nifty_lot_size(symbol):
     try:
-        month_str = symbol[7:10]  # e.g., "JUN"
-        year_str = symbol[5:7]    # e.g., "25"
+        month_str = symbol[7:10]
+        year_str = symbol[5:7]
         month = datetime.strptime(month_str, "%b").month
         year = int("20" + year_str)
         if year > 2025 or (year == 2025 and month >= 3):
             return 75
     except:
         pass
-    return 50  # fallback
+    return 50
 
 def place_kite_order(kite, symbol, quantity, txn_type, retries=3):
     lot_size = get_nifty_lot_size(symbol)
@@ -93,7 +94,7 @@ def get_current_position(kite):
             symbol = p['tradingsymbol']
     return lots, symbol
 
-# === BOT LOOP ===
+# === BOT LOGIC ===
 def run_nifty_monitor():
     kite = get_kite_client()
     while True:
@@ -101,6 +102,7 @@ def run_nifty_monitor():
         today = now.date()
         now_time = now.time()
 
+        # Block 9:00–9:05 AM (Kite restriction)
         if dtime(9, 0) <= now_time < dtime(9, 5):
             wait = (datetime.combine(today, dtime(9, 5)) - now).seconds
             print(f"⛔ Between 9:00–9:05 AM. Sleeping {wait} seconds...")
@@ -112,6 +114,7 @@ def run_nifty_monitor():
             time.sleep(MONITOR_INTERVAL)
             continue
 
+        # Get active contract
         expiry = get_last_thursday(2025, 6)
         rollover = get_rollover_date(expiry)
         days_to_expiry = (expiry - today).days
@@ -120,33 +123,39 @@ def run_nifty_monitor():
         current_lots, current_contract = get_current_position(kite)
         print(f"⏰ {now.strftime('%H:%M:%S')} | Holding: {current_lots} lot(s) in {current_contract or 'None'}")
 
+        # Rollover logic
         if today >= rollover and current_contract != new_contract and current_lots > 0:
             print("🔁 Rollover triggered...")
             for _ in range(current_lots):
                 place_kite_order(kite, current_contract, 1, KiteConnect.TRANSACTION_TYPE_SELL)
                 place_kite_order(kite, new_contract, 1, KiteConnect.TRANSACTION_TYPE_BUY)
                 time.sleep(STAGGER_DELAY)
-            print("✅ Rollover complete. Sleeping...")
+            print("✅ Rollover complete. Sleeping 1 hour...")
             time.sleep(MONITOR_INTERVAL)
             continue
 
+        # Already holding enough
         if current_lots >= TOTAL_LOTS:
-            print("✅ All lots held. Sleeping...")
+            print("✅ All lots held. Sleeping 1 hour...")
             time.sleep(MONITOR_INTERVAL)
             continue
 
+        # Staggered entry logic
         print("⚠️ Starting staggered entries...")
         while current_lots < TOTAL_LOTS:
             now = datetime.now()
-            if dtime(9, 0) <= now.time() < dtime(9, 5):
-                wait = (datetime.combine(today, dtime(9, 5)) - now).seconds
-                print(f"⛔ Waiting 9:00–9:05 window. Sleeping {wait} seconds...")
-                time.sleep(wait)
-                continue
+            now_time = now.time()
+            today = now.date()
 
             current_lots, _ = get_current_position(kite)
             if current_lots >= TOTAL_LOTS:
                 break
+
+            if dtime(9, 0) <= now_time < dtime(9, 5):
+                wait = (datetime.combine(today, dtime(9, 5)) - now).seconds
+                print(f"⛔ Still within 9:00–9:05 window. Sleeping {wait} seconds...")
+                time.sleep(wait)
+                continue
 
             place_kite_order(kite, new_contract, 1, KiteConnect.TRANSACTION_TYPE_BUY)
             time.sleep(STAGGER_DELAY)
